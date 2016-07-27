@@ -2,12 +2,13 @@ package scalacache.memcached
 
 import org.slf4j.LoggerFactory
 import net.spy.memcached.internal.{ OperationFuture, OperationCompletionListener, GetFuture, GetCompletionListener }
-import net.spy.memcached.{ AddrUtil, BinaryConnectionFactory, MemcachedClient }
+import net.spy.memcached.{AddrUtil, BinaryConnectionFactory, MemcachedClient}
+
 import scalacache.serialization.Codec
 import scalacache.{ LoggingSupport, Cache }
 
 import scala.concurrent.duration.Duration
-import scala.util.Success
+import scala.util.{Failure, Success, Try}
 import scala.concurrent.{ Promise, ExecutionContext }
 
 /**
@@ -36,7 +37,7 @@ class MemcachedCache(client: MemcachedClient,
     val p = Promise[Option[V]]()
     val f = client.asyncGet(keySanitizer.toValidMemcachedKey(key))
     f.addListener(new GetCompletionListener {
-      def onComplete(g: GetFuture[_]): Unit = p.complete {
+      def onComplete(g: GetFuture[_]): Unit = p.complete(Try {
         val baseResult = f.get
         val result = {
           if (baseResult != null) {
@@ -47,8 +48,8 @@ class MemcachedCache(client: MemcachedClient,
           } else None
         }
         logCacheHitOrMiss(key, result)
-        Success(result)
-      }
+        result
+      })
     })
     p.future
   }
@@ -63,14 +64,17 @@ class MemcachedCache(client: MemcachedClient,
    */
   override def put[V](key: String, value: V, ttl: Option[Duration])(implicit codec: Codec[V, Array[Byte]]) = {
     val p = Promise[Unit]()
-    val valueToSend = if (useLegacySerialization) value else codec.serialize(value)
-    val f = client.set(keySanitizer.toValidMemcachedKey(key), toMemcachedExpiry(ttl), valueToSend)
-    f.addListener(new OperationCompletionListener {
-      def onComplete(g: OperationFuture[_]): Unit = p.complete {
-        logCachePut(key, ttl)
-        Success(())
-      }
-    })
+    Try(if (useLegacySerialization) value else codec.serialize(value)) match {
+      case Success(valueToSend) =>
+        val f = client.set(keySanitizer.toValidMemcachedKey(key), toMemcachedExpiry(ttl), valueToSend)
+        f.addListener(new OperationCompletionListener {
+          def onComplete(g: OperationFuture[_]): Unit = p.complete {
+            logCachePut(key, ttl)
+            Success(())
+          }
+        })
+      case Failure(ex) => p.failure(ex)
+    }
     p.future
   }
 
